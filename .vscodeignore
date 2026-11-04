@@ -10,4 +10,8 @@ tsconfig*.json
 jest.config.*
 esbuild.js
 **/*.ts
-!out/**
+!out/extension.js
+**/*.map
+.github/**
+test.env
+*.vsix

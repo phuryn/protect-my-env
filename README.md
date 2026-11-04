@@ -1,5 +1,15 @@
 # Protect My Env
 
+> **phuryn fork** (extension ID `phuryn.protect-my-env`, built from source, not on the Marketplace). Changes from [upstream](https://github.com/marcuspmd/protect-my-env):
+>
+> - **A table of secrets only.** Comment lines and inline comments stay in the file but never reach the view.
+> - **Copy** copies the bare value (no `KEY=`, no surrounding quotes). **Show** reveals one row.
+> - **Replace** is blind: a masked, empty field; paste and press Enter. Empty input is refused, quotes are added when the value needs them.
+> - **Add** appends at the end of the file and refuses a key that already exists. Add-after and Delete are gone.
+> - Fixed two leaks: `export KEY=value` lines and the body of multiline quoted values (PEM keys) were rendered as plain text.
+>
+> Build: `npm ci --ignore-scripts && npx @vscode/vsce package --no-dependencies`, then `code --install-extension protect-my-env-<version>.vsix`.
+
 <p align="center">
   <img src="https://raw.githubusercontent.com/marcuspmd/protect-my-env/master/icon.png" alt="Protect My Env Icon" width="128" />
 </p>

@@ -1,18 +1,18 @@
 {
   "name": "protect-my-env",
-  "displayName": "Protect My Env",
-  "description": "Protects your .env files from accidental screen exposure.",
-  "version": "0.1.4",
-  "publisher": "marcuspmd",
+  "displayName": "Protect My Env (phuryn fork)",
+  "description": "Masks .env values in a table of secrets: show, copy and blind-replace values without exposing them on screen.",
+  "version": "0.2.0",
+  "publisher": "phuryn",
   "icon": "icon.png",
   "repository": {
     "type": "git",
-    "url": "https://github.com/marcuspmd/protect-my-env"
+    "url": "https://github.com/phuryn/protect-my-env"
   },
   "bugs": {
-    "url": "https://github.com/marcuspmd/protect-my-env/issues"
+    "url": "https://github.com/phuryn/protect-my-env/issues"
   },
-  "homepage": "https://github.com/marcuspmd/protect-my-env#readme",
+  "homepage": "https://github.com/phuryn/protect-my-env#readme",
   "license": "MIT",
   "keywords": [
     "env",
@@ -78,11 +78,6 @@
           "type": "number",
           "default": 8,
           "description": "Fixed length of the masked text. Set to 0 to match the exact length of the original value."
-        },
-        "protectMyEnv.protectComments": {
-          "type": "boolean",
-          "default": false,
-          "description": "Whether to also mask comments (full line and inline comments) in .env files."
         }
       }
     },
@@ -103,7 +98,7 @@
     ]
   },
   "scripts": {
-    "vscode:prepublish": "npm run esbuild-base -- --minify",
+    "vscode:prepublish": "npm run esbuild-base -- --production",
     "esbuild-base": "node esbuild.js",
     "esbuild": "npm run esbuild-base -- --sourcemap",
     "watch": "node esbuild.js --watch",

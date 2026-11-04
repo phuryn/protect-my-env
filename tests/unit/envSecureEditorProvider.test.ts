@@ -124,7 +124,7 @@ describe('EnvSecureEditorProvider document edits', () => {
     expect(getReplacementText()).toBe('B=2');
   });
 
-  it('adds new key without extra line break when document already ends with newline', async () => {
+  it('appends a new key at the end and keeps the trailing newline', async () => {
     const provider = createProvider();
     const doc = createDocument('/tmp/.env', 'A=1\n');
 
@@ -134,7 +134,76 @@ describe('EnvSecureEditorProvider document edits', () => {
       value: '2',
     });
 
-    expect(getReplacementText()).toBe('A=1\nB=2');
+    expect(getReplacementText()).toBe('A=1\nB=2\n');
+  });
+
+  it('appends with CRLF in a CRLF file and quotes a value that would break the line', async () => {
+    const provider = createProvider();
+    const doc = createDocument('/tmp/.env', 'A=1\r\n# tail comment\r\n');
+
+    await sendMessage(provider, doc, {
+      type: 'addPair',
+      key: 'B',
+      value: '  pass word#1\n',
+    });
+
+    expect(getReplacementText()).toBe("A=1\r\n# tail comment\r\nB='pass word#1'\r\n");
+  });
+
+  it('replaces only the value span, trimming the pasted value and keeping quotes and comments', async () => {
+    const provider = createProvider();
+    const doc = createDocument('/tmp/.env', '# keys\nexport API_KEY="old" # rotated\nTOKEN=abc');
+
+    await sendMessage(provider, doc, {
+      type: 'editValue',
+      key: 'API_KEY',
+      newValue: 'sk-new\n',
+      lineIndex: 1,
+    });
+
+    expect(getReplacementText()).toBe('# keys\nexport API_KEY="sk-new" # rotated\nTOKEN=abc');
+  });
+
+  it('replaces a multiline value as one span', async () => {
+    const provider = createProvider();
+    const doc = createDocument('/tmp/.env', 'A=1\nPEM="-----BEGIN-----\nMIIEv==\n-----END-----"\nB=2');
+
+    await sendMessage(provider, doc, {
+      type: 'editValue',
+      key: 'PEM',
+      newValue: 'short',
+      lineIndex: 1,
+    });
+
+    expect(getReplacementText()).toBe('A=1\nPEM="short"\nB=2');
+  });
+
+  it('refuses an empty replacement instead of wiping the secret', async () => {
+    const provider = createProvider();
+    const doc = createDocument('/tmp/.env', 'A=1');
+
+    await sendMessage(provider, doc, {
+      type: 'editValue',
+      key: 'A',
+      newValue: '   ',
+      lineIndex: 0,
+    });
+
+    expect((vscode as any).workspace.applyEdit).not.toHaveBeenCalled();
+    expect((vscode as any).window.showErrorMessage).toHaveBeenCalledWith('New value for A is empty. Nothing was changed.');
+  });
+
+  it('formats blind values safely', () => {
+    const provider = createProvider();
+    const format = (value: string, previous?: string) => (provider as any).formatValue(value, previous);
+
+    expect(format('plain')).toBe('plain');
+    expect(format('plain', '"old"')).toBe('"plain"');
+    expect(format("it's", "'old'")).toBe('"it\'s"');
+    expect(format('a b')).toBe("'a b'");
+    expect(format('pa$$', '"old"')).toBe("'pa$$'");
+    expect(format('"typed quoted"')).toBe('"typed quoted"');
+    expect(format('back\\slash')).toBe('back\\slash');
   });
 
   it('deletes last line in CRLF file and removes previous CRLF', async () => {
@@ -152,17 +221,12 @@ describe('EnvSecureEditorProvider document edits', () => {
 });
 
 describe('EnvSecureEditorProvider webview', () => {
-  it('builds rows for env values and comments', () => {
+  it('builds rows for env values only; comment lines stay out of the table', () => {
     const provider = createProvider();
     const doc = createDocument('/tmp/.env', '# App config\nTOKEN=abc # auth token\nAPI_KEY=old');
     const rows = (provider as any).buildRows(doc);
 
     expect(rows).toEqual([
-      expect.objectContaining({
-        type: 'comment',
-        text: '# App config',
-        lineIndex: 0,
-      }),
       expect.objectContaining({
         type: 'pair',
         key: 'TOKEN',
@@ -217,59 +281,64 @@ describe('EnvSecureEditorProvider webview', () => {
     const html = (provider as any).getHtml({ cspSource: 'vscode-resource:' }, rows);
 
     expect(html).toContain('id="search"');
-    expect(html).toContain('placeholder="Search keys and comments"');
+    expect(html).toContain('placeholder="Search keys"');
     expect(html).toContain('id="sort-key"');
     expect(html).toContain('aria-sort="none"');
-    expect(html).toContain('<th>Comment</th>');
+    expect(html).not.toContain('<th>Comment</th>');
     expect(html).toContain('class="actions-header"');
     expect(html).toContain("actionButtons.className = 'action-buttons';");
-    expect(html).toContain("td.colSpan = 4;");
+    expect(html).toContain('td.colSpan = 3;');
     expect(html).toContain('class="fa-icon"');
     expect(html).toContain('element.title = label;');
     expect(html).toContain('syncTextIconButton');
-    expect(html).toContain("iconButton('edit', 'Edit'");
     expect(html).toContain('sortKeyButton.addEventListener');
-    expect(html).toContain('function commentText(row)');
-    expect(html).toContain('td.textContent = commentText(row);');
-    expect(html).toContain('commentCell.textContent = commentText(row);');
+    expect(html).toContain('id="add-new"');
+    expect(html).not.toContain('# App config');
   });
 
-  it('marks comments for masking when comment protection is enabled', () => {
-    setConfig({
-      maskCharacter: '*',
-      maskLength: 4,
-      protectComments: true,
-    });
-
+  it('copies the bare value and replaces and adds through masked fields', () => {
     const provider = createProvider();
-    const doc = createDocument('/tmp/.env', '# App config\nTOKEN=abc # auth token');
-    const rows = (provider as any).buildRows(doc);
+    const doc = createDocument('/tmp/.env', 'TOKEN="abc"');
+    const html = (provider as any).getHtml({ cspSource: 'vscode-resource:' }, (provider as any).buildRows(doc));
 
-    expect(rows[0]).toEqual(
-      expect.objectContaining({
-        type: 'comment',
-        text: '# App config',
-        shouldMask: true,
-      })
-    );
-    expect(rows[1]).toEqual(
-      expect.objectContaining({
-        type: 'pair',
-        key: 'TOKEN',
-        comment: '# auth token',
-        shouldMask: true,
-        commentShouldMask: true,
-      })
-    );
+    expect(html).toContain("iconButton('copy', 'Copy value'");
+    expect(html).toContain('navigator.clipboard.writeText(plainValue(row.value))');
+    expect(html).not.toContain("row.key + '=' + row.value");
+    expect(html).toContain("iconButton('edit', 'Replace value'");
+    expect(html).toContain("editInput = secretInput('new value (hidden)')");
+    expect(html).toContain("const valueInput = secretInput('value (hidden)')");
+    expect(html).toContain("element.type = 'password'");
+    expect(html).not.toContain("'Add after'");
+    expect(html).not.toContain("'Delete'");
   });
 
-  it('leaves comments unmasked when comment protection is disabled', () => {
+  it('keeps export lines and multiline values as single masked pairs, never as text rows', () => {
     const provider = createProvider();
-    const doc = createDocument('/tmp/.env', '# App config\nTOKEN=abc # auth token');
+    const doc = createDocument(
+      '/tmp/.env',
+      'export AWS_SECRET=abc123\nPRIVATE_KEY="-----BEGIN-----\nMIIEvQ==\nSECRETLINE\n-----END-----"\nNEXT=1'
+    );
     const rows = (provider as any).buildRows(doc);
 
-    expect(rows[0]).toEqual(expect.objectContaining({ type: 'comment', shouldMask: false }));
-    expect(rows[1]).toEqual(expect.objectContaining({ type: 'pair', commentShouldMask: false }));
+    expect(rows.map((row: any) => [row.type, row.key, row.shouldMask])).toEqual([
+      ['pair', 'AWS_SECRET', true],
+      ['pair', 'PRIVATE_KEY', true],
+      ['pair', 'NEXT', true],
+    ]);
+    expect(rows[1].value).toBe('"-----BEGIN-----\nMIIEvQ==\nSECRETLINE\n-----END-----"');
+  });
+
+  it('never sends full-line comments to the webview, whatever the comment setting', () => {
+    for (const protectComments of [true, false]) {
+      setConfig({ maskCharacter: '*', maskLength: 4, protectComments });
+
+      const provider = createProvider();
+      const doc = createDocument('/tmp/.env', '# App config\nTOKEN=abc # auth token');
+      const rows = (provider as any).buildRows(doc);
+
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toEqual(expect.objectContaining({ type: 'pair', key: 'TOKEN' }));
+    }
   });
 
   it('marks duplicate keys with warnings in rows', () => {
@@ -470,7 +539,7 @@ describe('EnvSecureEditorProvider guards and error paths', () => {
     expect(getReplacementText()).toBe('A=1\r\nB=2\r\nC=3');
   });
 
-  it('updates existing key through addPair flow', async () => {
+  it('refuses to add a key that already exists instead of overwriting its secret', async () => {
     const provider = createProvider();
     const doc = createDocument('/tmp/.env', 'A=1');
 
@@ -480,8 +549,8 @@ describe('EnvSecureEditorProvider guards and error paths', () => {
       value: '9',
     });
 
-    expect((vscode as any).workspace.applyEdit).toHaveBeenCalledTimes(1);
-    expect(getReplacementText()).toBe('A=9');
+    expect((vscode as any).workspace.applyEdit).not.toHaveBeenCalled();
+    expect((vscode as any).window.showErrorMessage).toHaveBeenCalledWith('A already exists. Use Replace on its row.');
   });
 
   it('shows error when workspace edit is not applied', async () => {

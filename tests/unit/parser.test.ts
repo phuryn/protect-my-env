@@ -124,5 +124,36 @@ describe('EnvParser', () => {
       expect(lines[3].type).toBe('pair');
       expect(lines[3].commentStartOffset).toBe(4);
     });
+
+    it('treats export-prefixed lines as pairs', () => {
+      const [line] = EnvParser.parse('export AWS_SECRET=abc123');
+
+      expect(line.type).toBe('pair');
+      expect(line.key).toBe('AWS_SECRET');
+      expect(line.value).toBe('abc123');
+      expect(line.valueStartOffset).toBe(18);
+    });
+
+    it('joins a multiline quoted value into one pair with continuation lines', () => {
+      const text = 'A=1\r\nPEM="-----BEGIN-----\r\nMIIEv==\r\n-----END-----" # cert\r\nB=2';
+      const lines = EnvParser.parse(text);
+
+      expect(lines.map((line) => line.type)).toEqual(['pair', 'pair', 'continuation', 'continuation', 'pair']);
+      const pem = lines[1];
+      expect(pem.key).toBe('PEM');
+      expect(pem.value).toBe('"-----BEGIN-----\r\nMIIEv==\r\n-----END-----"');
+
+      const pemStart = text.indexOf('PEM=');
+      expect(text.substring(pemStart + (pem.valueStartOffset as number), pemStart + (pem.valueEndOffset as number))).toBe(pem.value);
+      expect(text.substring(pemStart + (pem.commentStartOffset as number), pemStart + (pem.commentEndOffset as number))).toBe('# cert');
+      expect(lines[4]).toEqual(expect.objectContaining({ type: 'pair', key: 'B', lineIndex: 4 }));
+    });
+
+    it('keeps an unterminated quote on its own line when nothing closes it', () => {
+      const lines = EnvParser.parse("A='open\nB=2");
+
+      expect(lines.map((line) => [line.type, line.key])).toEqual([['pair', 'A'], ['pair', 'B']]);
+      expect(lines[0].value).toBe("'open");
+    });
   });
 });

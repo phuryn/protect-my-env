@@ -4,6 +4,18 @@ All notable changes to **Protect My Env** are documented here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.0.0/) and the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.0] - 2026-11-04 (phuryn fork)
+
+### Changed
+
+- Table shows key/value pairs only; comments are no longer rendered.
+- Copy copies the bare value; Replace and Add use masked, empty inputs; Add appends at the end and never overwrites an existing key.
+- Removed Add-after and Delete row actions.
+
+### Fixed
+
+- `export KEY=value` lines and multiline quoted values were rendered as unmasked text rows.
+
 ## [Unreleased]
 
 ### Changed

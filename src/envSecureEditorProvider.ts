@@ -197,11 +197,18 @@ export class EnvSecureEditorProvider implements vscode.CustomTextEditorProvider,
       return;
     }
 
+    const newValue = message.newValue.trim();
+    if (newValue.length === 0) {
+      vscode.window.showErrorMessage(`New value for ${message.key} is empty. Nothing was changed.`);
+      return;
+    }
+
     const currentText = document.getText();
     const lineStartOffset = document.offsetAt(new vscode.Position(target.lineIndex, 0));
     const valueStartOffset = lineStartOffset + target.valueStartOffset;
     const valueEndOffset = lineStartOffset + target.valueEndOffset;
-    const nextText = `${currentText.slice(0, valueStartOffset)}${message.newValue}${currentText.slice(valueEndOffset)}`;
+    const formatted = this.formatValue(newValue, target.value ?? '');
+    const nextText = `${currentText.slice(0, valueStartOffset)}${formatted}${currentText.slice(valueEndOffset)}`;
 
     if (await this.replaceDocumentText(document, nextText)) {
       vscode.window.showInformationMessage(`Updated ${message.key}.`);
@@ -215,24 +222,25 @@ export class EnvSecureEditorProvider implements vscode.CustomTextEditorProvider,
       return;
     }
 
-    const value = message.value;
+    const value = this.formatValue(message.value.trim());
     const currentPairs = this.buildPairs(document);
     const existing = currentPairs.find((pair) => pair.key === key);
 
     if (existing) {
-      await this.applyValueEdit(document, {
-        type: 'editValue',
-        key,
-        newValue: value,
-        lineIndex: existing.lineIndex,
-      });
+      // Adding must never overwrite a secret silently; replacing is its own, explicit action.
+      vscode.window.showErrorMessage(`${key} already exists. Use Replace on its row.`);
       return;
     }
 
+    // Append at the end, keeping the file's line-break style and whether it ends with one.
     const currentText = document.getText();
-    const needsLeadingBreak = currentText.length > 0 && !currentText.endsWith('\n');
-    const insertion = `${needsLeadingBreak ? '\n' : ''}${key}=${value}`;
-    const nextText = `${currentText}${insertion}`;
+    const lineBreak = this.detectLineBreak(currentText);
+    const pairText = `${key}=${value}`;
+    const nextText = currentText.length === 0
+      ? `${pairText}${lineBreak}`
+      : currentText.endsWith('\n')
+        ? `${currentText}${pairText}${lineBreak}`
+        : `${currentText}${lineBreak}${pairText}`;
 
     if (await this.replaceDocumentText(document, nextText)) {
       vscode.window.showInformationMessage(`Added ${key}.`);
@@ -332,6 +340,37 @@ export class EnvSecureEditorProvider implements vscode.CustomTextEditorProvider,
     return applied;
   }
 
+  /**
+   * Turns a value typed or pasted blind into a safe .env token. It keeps the quote style the
+   * old value used, and quotes when the value would otherwise break the line (spaces, #,
+   * quotes) or expand ($). A value typed already quoted is written as typed.
+   */
+  private formatValue(value: string, previousToken = ''): string {
+    const first = value[0];
+    if (value.length >= 2 && (first === '"' || first === "'") && value[value.length - 1] === first) {
+      return value;
+    }
+
+    const previousQuote = previousToken[0] === '"' || previousToken[0] === "'" ? previousToken[0] : '';
+    const needsQuotes = /[\s#"'`$\\]/.test(value);
+    if (!needsQuotes && !previousQuote) {
+      return value;
+    }
+
+    const candidates = value.includes('$')
+      ? ["'", '"']
+      : previousQuote
+        ? [previousQuote, previousQuote === '"' ? "'" : '"']
+        : ["'", '"'];
+    for (const quote of candidates) {
+      if (!value.includes(quote) && !value.includes('\\')) {
+        return `${quote}${value}${quote}`;
+      }
+    }
+
+    return value;
+  }
+
   private getLineBreakAt(content: string, offset: number): string | undefined {
     if (content.startsWith('\r\n', offset)) {
       return '\r\n';
@@ -350,18 +389,9 @@ export class EnvSecureEditorProvider implements vscode.CustomTextEditorProvider,
     const protectComments = ConfigManager.getProtectComments();
 
     for (const line of parsed) {
-      if (line.type === 'empty') {
-        continue;
-      }
-
-      if (line.type === 'comment') {
-        rows.push({
-          type: 'comment',
-          id: `${line.lineIndex}:comment`,
-          text: line.originalText.trim(),
-          shouldMask: protectComments,
-          lineIndex: line.lineIndex,
-        });
+      // A table of secrets: comments, blank lines and multiline continuations stay in the
+      // file untouched but never reach the webview.
+      if (line.type !== 'pair') {
         continue;
       }
 
@@ -823,7 +853,7 @@ export class EnvSecureEditorProvider implements vscode.CustomTextEditorProvider,
     <div class="head">
       <div>
         <h1 class="title">Protect My Env</h1>
-        <p class="meta">Sensitive values are masked by default. Reveal individually or all at once.</p>
+        <p class="meta">Values are masked. Copy and Replace work without showing them.</p>
       </div>
       <div class="right">
         <button id="open-text" class="text-icon-button" title="Open as text" aria-label="Open as text">
@@ -836,16 +866,16 @@ export class EnvSecureEditorProvider implements vscode.CustomTextEditorProvider,
         </button>
       </div>
     </div>
-    <div class="banner">
-      Opening .env here avoids exposing values before the secure view is ready.
-      Use reveal only when needed and for as little time as possible.
-    </div>
     <div class="toolbar" aria-label="Env view controls">
       <label class="field" for="search">
         <span>Search</span>
-        <input id="search" class="control-input" type="search" placeholder="Search keys and comments" autocomplete="off" />
+        <input id="search" class="control-input" type="search" placeholder="Search keys" autocomplete="off" />
       </label>
       <div class="toolbar-actions">
+        <button id="add-new" class="text-icon-button" type="button" title="Add a key at the end of the file" aria-label="Add a key at the end of the file">
+          <span id="add-new-icon"></span>
+          <span>Add</span>
+        </button>
         <button id="filter-duplicates" class="text-icon-button" type="button" title="Show duplicates only" aria-label="Show duplicates only" aria-pressed="false">
           <span id="filter-duplicates-icon"></span>
           <span id="filter-duplicates-text">Duplicates</span>
@@ -859,7 +889,6 @@ export class EnvSecureEditorProvider implements vscode.CustomTextEditorProvider,
       <colgroup>
         <col class="key-column" />
         <col class="value-column" />
-        <col class="comment-column" />
         <col class="actions-column" />
       </colgroup>
       <thead>
@@ -871,7 +900,6 @@ export class EnvSecureEditorProvider implements vscode.CustomTextEditorProvider,
             </button>
           </th>
           <th>Value</th>
-          <th>Comment</th>
           <th class="actions-header">Actions</th>
         </tr>
       </thead>
@@ -902,13 +930,14 @@ export class EnvSecureEditorProvider implements vscode.CustomTextEditorProvider,
     const filterDuplicatesIcon = document.getElementById('filter-duplicates-icon');
     const filterDuplicatesText = document.getElementById('filter-duplicates-text');
     const filterDuplicatesCount = document.getElementById('filter-duplicates-count');
+    const addNewButton = document.getElementById('add-new');
+    const addNewIcon = document.getElementById('add-new-icon');
     const revealed = new Set();
     const hidden = new Set();
     const hasPairRows = data.some((row) => row.type === 'pair');
     const duplicateTotal = data.reduce((sum, row) => sum + (row.type === 'pair' && row.isDuplicate ? 1 : 0), 0);
     let editingId = null;
-    let addingAfterId = hasPairRows ? null : '__empty__';
-    let deletingId = null;
+    let addingNew = !hasPairRows;
     let revealAll = false;
     let searchQuery = '';
     let sortMode = 'file';
@@ -950,21 +979,14 @@ export class EnvSecureEditorProvider implements vscode.CustomTextEditorProvider,
       return !isValueRevealed(row);
     }
 
-    function isCommentMasked(row) {
-      if (row.type === 'pair') {
-        return row.commentShouldMask && isValueMasked(row);
+    // The secret itself, without the quotes that wrap it in the file.
+    function plainValue(raw) {
+      const first = raw.charAt(0);
+      if (raw.length >= 2 && (first === '"' || first === "'") && raw.charAt(raw.length - 1) === first) {
+        return raw.slice(1, -1);
       }
 
-      return row.shouldMask && !revealAll;
-    }
-
-    function commentText(row) {
-      const text = row.type === 'pair' ? row.comment : row.text;
-      if (!text) {
-        return '';
-      }
-
-      return isCommentMasked(row) ? mask(text) : text;
+      return raw;
     }
 
     function mask(value) {
@@ -998,10 +1020,34 @@ export class EnvSecureEditorProvider implements vscode.CustomTextEditorProvider,
       element.className = className ? 'inline-input ' + className : 'inline-input';
       element.value = value;
       element.placeholder = placeholder;
+      element.autocomplete = 'off';
+      element.spellcheck = false;
       return element;
     }
 
-    function appendAddRow(anchorRow) {
+    // A value field that never displays what is typed or pasted into it.
+    function secretInput(placeholder) {
+      const element = input('', placeholder, '');
+      element.type = 'password';
+      return element;
+    }
+
+    // Enter saves, Escape cancels, from any of the row's fields.
+    function bindKeys(fields, onSave, onCancel) {
+      for (const field of fields) {
+        field.addEventListener('keydown', (event) => {
+          if (event.key === 'Enter') {
+            event.preventDefault();
+            onSave();
+          } else if (event.key === 'Escape') {
+            event.preventDefault();
+            onCancel();
+          }
+        });
+      }
+    }
+
+    function appendAddRow() {
       const tr = document.createElement('tr');
 
       const keyCell = document.createElement('td');
@@ -1009,14 +1055,10 @@ export class EnvSecureEditorProvider implements vscode.CustomTextEditorProvider,
       keyCell.appendChild(keyInput);
 
       const valueCell = document.createElement('td');
-      const valueInput = input('', 'value', '');
+      const valueInput = secretInput('value (hidden)');
       valueCell.appendChild(valueInput);
 
-      const commentCell = document.createElement('td');
-      commentCell.className = 'comment';
-
-      const { actionCell, actionButtons } = createActionsCell();
-      actionButtons.appendChild(iconButton('confirm', 'Save', '', () => {
+      const save = () => {
         const key = keyInput.value.trim();
         if (!key) {
           setStatus('Key is required.');
@@ -1024,34 +1066,27 @@ export class EnvSecureEditorProvider implements vscode.CustomTextEditorProvider,
           return;
         }
 
-        setStatus('Saving ' + key + '...');
+        setStatus('Adding ' + key + '...');
+        vscode.postMessage({
+          type: 'addPair',
+          key,
+          value: valueInput.value,
+        });
+      };
 
-        if (anchorRow) {
-          vscode.postMessage({
-            type: 'addAfter',
-            key: anchorRow.key,
-            lineIndex: anchorRow.lineIndex,
-            newKey: key,
-            newValue: valueInput.value,
-          });
-        } else {
-          vscode.postMessage({
-            type: 'addPair',
-            key,
-            value: valueInput.value,
-          });
-        }
-      }));
-
-      actionButtons.appendChild(iconButton('cancel', 'Cancel', '', () => {
-        addingAfterId = hasPairRows ? null : '__empty__';
+      const cancel = () => {
+        addingNew = !hasPairRows;
         setStatus('');
         render();
-      }));
+      };
+
+      const { actionCell, actionButtons } = createActionsCell();
+      actionButtons.appendChild(iconButton('confirm', 'Add', '', save));
+      actionButtons.appendChild(iconButton('cancel', 'Cancel', '', cancel));
+      bindKeys([keyInput, valueInput], save, cancel);
 
       tr.appendChild(keyCell);
       tr.appendChild(valueCell);
-      tr.appendChild(commentCell);
       tr.appendChild(actionCell);
       rows.appendChild(tr);
       keyInput.focus();
@@ -1062,11 +1097,7 @@ export class EnvSecureEditorProvider implements vscode.CustomTextEditorProvider,
         return true;
       }
 
-      if (row.type === 'pair') {
-        return row.key.toLowerCase().includes(query) || row.comment.toLowerCase().includes(query);
-      }
-
-      return row.text.toLowerCase().includes(query);
+      return row.key.toLowerCase().includes(query);
     }
 
     function getVisibleRows() {
@@ -1110,7 +1141,7 @@ export class EnvSecureEditorProvider implements vscode.CustomTextEditorProvider,
       const tr = document.createElement('tr');
       const td = document.createElement('td');
       td.className = 'empty';
-      td.colSpan = 4;
+      td.colSpan = 3;
       td.textContent = text;
       tr.appendChild(td);
       rows.appendChild(tr);
@@ -1134,22 +1165,10 @@ export class EnvSecureEditorProvider implements vscode.CustomTextEditorProvider,
       keyHeader.setAttribute('aria-sort', sortMode === 'key-asc' ? 'ascending' : sortMode === 'key-desc' ? 'descending' : 'none');
     }
 
-    function renderCommentRow(row) {
-      const tr = document.createElement('tr');
-      const td = document.createElement('td');
-      tr.className = 'comment-row';
-      td.className = 'comment-row-cell';
-      td.colSpan = 4;
-      td.textContent = commentText(row);
-      tr.appendChild(td);
-      rows.appendChild(tr);
-    }
-
     function renderPairRow(row) {
       const isMasked = isValueMasked(row);
       const shown = isMasked ? mask(row.value) : row.value;
       const isEditing = editingId === row.id;
-      const isDeleting = deletingId === row.id;
 
       const tr = document.createElement('tr');
 
@@ -1177,60 +1196,43 @@ export class EnvSecureEditorProvider implements vscode.CustomTextEditorProvider,
       let editInput = null;
 
       if (isEditing) {
-        editInput = input(row.value, 'value', '');
+        // Replace is blind: the field starts empty and masks whatever is typed or pasted.
+        editInput = secretInput('new value (hidden)');
         valueCell.appendChild(editInput);
       } else {
         valueCell.textContent = shown;
       }
 
-      const commentCell = document.createElement('td');
-      commentCell.className = 'comment';
-      commentCell.textContent = commentText(row);
-
       const { actionCell, actionButtons } = createActionsCell();
 
       if (isEditing && editInput) {
-        actionButtons.appendChild(iconButton('confirm', 'Save', '', () => {
-          setStatus('Saving ' + row.key + '...');
+        const save = () => {
+          if (editInput.value.trim() === '') {
+            setStatus('Paste or type the new value, or press Escape to cancel.');
+            editInput.focus();
+            return;
+          }
+
+          setStatus('Replacing ' + row.key + '...');
           vscode.postMessage({
             type: 'editValue',
             key: row.key,
             newValue: editInput.value,
             lineIndex: row.lineIndex,
           });
-        }));
+        };
 
-        actionButtons.appendChild(iconButton('cancel', 'Cancel', '', () => {
+        const cancel = () => {
           editingId = null;
           setStatus('');
           render();
-        }));
-      } else if (isDeleting) {
-        actionButtons.appendChild(iconButton('confirm', 'Confirm delete', 'danger', () => {
-          setStatus('Deleting ' + row.key + '...');
-          vscode.postMessage({
-            type: 'deletePair',
-            key: row.key,
-            lineIndex: row.lineIndex,
-          });
-        }));
+        };
 
-        actionButtons.appendChild(iconButton('cancel', 'Cancel', '', () => {
-          deletingId = null;
-          setStatus('');
-          render();
-        }));
+        actionButtons.appendChild(iconButton('confirm', 'Save', '', save));
+        actionButtons.appendChild(iconButton('cancel', 'Cancel', '', cancel));
+        bindKeys([editInput], save, cancel);
       } else {
-        actionButtons.appendChild(iconButton('copy', 'Copy key=value', '', () => {
-          navigator.clipboard.writeText(row.key + '=' + row.value).then(() => {
-            setStatus('Copied ' + row.key + '=... to clipboard.');
-            setTimeout(() => setStatus(''), 2000);
-          }).catch(() => {
-            setStatus('Failed to copy to clipboard.');
-          });
-        }));
-
-        actionButtons.appendChild(iconButton(isMasked ? 'reveal' : 'hide', isMasked ? 'Reveal' : 'Hide', '', () => {
+        actionButtons.appendChild(iconButton(isMasked ? 'reveal' : 'hide', isMasked ? 'Show' : 'Hide', '', () => {
           if (isMasked) {
             hidden.delete(row.id);
             revealed.add(row.id);
@@ -1241,26 +1243,18 @@ export class EnvSecureEditorProvider implements vscode.CustomTextEditorProvider,
           render();
         }));
 
-        actionButtons.appendChild(iconButton('edit', 'Edit', '', () => {
+        actionButtons.appendChild(iconButton('copy', 'Copy value', '', () => {
+          navigator.clipboard.writeText(plainValue(row.value)).then(() => {
+            setStatus('Copied the value of ' + row.key + '.');
+            setTimeout(() => setStatus(''), 2000);
+          }).catch(() => {
+            setStatus('Failed to copy to clipboard.');
+          });
+        }));
+
+        actionButtons.appendChild(iconButton('edit', 'Replace value', '', () => {
           editingId = row.id;
-          deletingId = null;
-          addingAfterId = null;
-          setStatus('');
-          render();
-        }));
-
-        actionButtons.appendChild(iconButton('add', 'Add after', '', () => {
-          addingAfterId = row.id;
-          editingId = null;
-          deletingId = null;
-          setStatus('');
-          render();
-        }));
-
-        actionButtons.appendChild(iconButton('delete', 'Delete', 'danger', () => {
-          deletingId = row.id;
-          editingId = null;
-          addingAfterId = null;
+          addingNew = !hasPairRows;
           setStatus('');
           render();
         }));
@@ -1268,13 +1262,8 @@ export class EnvSecureEditorProvider implements vscode.CustomTextEditorProvider,
 
       tr.appendChild(keyCell);
       tr.appendChild(valueCell);
-      tr.appendChild(commentCell);
       tr.appendChild(actionCell);
       rows.appendChild(tr);
-
-      if (addingAfterId === row.id) {
-        appendAddRow(row);
-      }
     }
 
     function render() {
@@ -1282,12 +1271,13 @@ export class EnvSecureEditorProvider implements vscode.CustomTextEditorProvider,
       const revealAllLabel = revealAll ? 'Hide all' : 'Reveal all';
       syncTextIconButton(openAsTextButton, openAsTextIcon, openAsTextText, 'openText', 'Open as text');
       syncTextIconButton(revealAllButton, revealAllIcon, revealAllText, revealAll ? 'hide' : 'reveal', revealAllLabel);
+      addNewIcon.innerHTML = renderIcon('add');
       renderSortHeader();
       renderDuplicateFilter();
 
       if (data.length === 0) {
         renderEmpty('No env values yet.');
-        appendAddRow(null);
+        appendAddRow();
         return;
       }
 
@@ -1297,24 +1287,20 @@ export class EnvSecureEditorProvider implements vscode.CustomTextEditorProvider,
         if (duplicatesOnly) {
           renderEmpty(duplicateTotal === 0 ? 'No duplicate keys detected.' : 'No duplicate keys match this search.');
         } else {
-          renderEmpty('No env values or comments match this search.');
+          renderEmpty('No keys match this search.');
         }
-        return;
       }
 
       for (const row of visibleRows) {
-        if (row.type === 'pair') {
-          renderPairRow(row);
-        } else {
-          renderCommentRow(row);
-        }
+        renderPairRow(row);
       }
 
-      if (!hasPairRows && addingAfterId === '__empty__' && searchQuery.trim() === '') {
-        appendAddRow(null);
+      if (addingNew) {
+        appendAddRow();
+        return;
       }
 
-      if (editingId || addingAfterId) {
+      if (editingId) {
         const activeInput = rows.querySelector('input');
         if (activeInput) {
           activeInput.focus();
@@ -1360,6 +1346,13 @@ export class EnvSecureEditorProvider implements vscode.CustomTextEditorProvider,
 
     openAsTextButton.addEventListener('click', () => {
       vscode.postMessage({ type: 'openAsText' });
+    });
+
+    addNewButton.addEventListener('click', () => {
+      addingNew = true;
+      editingId = null;
+      setStatus('');
+      render();
     });
 
     filterDuplicatesButton.addEventListener('click', () => {

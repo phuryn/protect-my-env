@@ -1,7 +1,8 @@
 export interface EnvLine {
   lineIndex: number;
   originalText: string;
-  type: 'empty' | 'comment' | 'pair';
+  /** 'continuation': a physical line that belongs to the multiline value of the pair above it. */
+  type: 'empty' | 'comment' | 'pair' | 'continuation';
   key?: string;
   value?: string;
   valueStartOffset?: number;
@@ -16,7 +17,95 @@ export class EnvParser {
    */
   public static parse(text: string): EnvLine[] {
     const lines = text.split(/\r?\n/);
-    return lines.map((line, index) => this.parseLine(line, index));
+    const breaks = text.match(/\r?\n/g) ?? [];
+    const result: EnvLine[] = [];
+
+    let index = 0;
+    while (index < lines.length) {
+      const parsed = this.parseLine(lines[index], index);
+      const multiline = parsed.type === 'pair'
+        ? this.joinMultilineValue(parsed, lines, breaks)
+        : undefined;
+
+      if (multiline) {
+        result.push(multiline.pair);
+        for (let next = index + 1; next <= multiline.lastLine; next++) {
+          result.push({ lineIndex: next, originalText: lines[next], type: 'continuation' });
+        }
+        index = multiline.lastLine + 1;
+        continue;
+      }
+
+      result.push(parsed);
+      index++;
+    }
+
+    return result;
+  }
+
+  /**
+   * A quoted value whose closing quote is on a later line (PEM keys, certificates) is one
+   * value, as dotenv reads it. Returns the pair re-spanned across those lines, with offsets
+   * still relative to the start of its first line, or undefined when the quote closes on
+   * its own line or never closes.
+   */
+  private static joinMultilineValue(
+    pair: EnvLine,
+    lines: string[],
+    breaks: string[]
+  ): { pair: EnvLine; lastLine: number } | undefined {
+    const value = pair.value ?? '';
+    const quote = value[0];
+    if ((quote !== '"' && quote !== "'") || this.findClosingQuote(value, 1, quote) !== -1) {
+      return undefined;
+    }
+
+    let fullText = lines[pair.lineIndex];
+    for (let next = pair.lineIndex + 1; next < lines.length; next++) {
+      const line = lines[next];
+      const lineStart = fullText.length + breaks[next - 1].length;
+      fullText += breaks[next - 1] + line;
+
+      const close = this.findClosingQuote(line, 0, quote);
+      if (close === -1) {
+        continue;
+      }
+
+      const valueEndOffset = lineStart + close + 1;
+      const commentMatch = line.substring(close + 1).match(/\s#/);
+      const commentStartOffset = commentMatch && commentMatch.index !== undefined
+        ? valueEndOffset + commentMatch.index + 1
+        : undefined;
+
+      return {
+        lastLine: next,
+        pair: {
+          ...pair,
+          originalText: fullText,
+          value: fullText.substring(pair.valueStartOffset ?? 0, valueEndOffset),
+          valueEndOffset,
+          commentStartOffset,
+          commentEndOffset: commentStartOffset !== undefined ? fullText.length : undefined,
+        },
+      };
+    }
+
+    return undefined;
+  }
+
+  private static findClosingQuote(text: string, from: number, quote: string): number {
+    let escaped = false;
+    for (let i = from; i < text.length; i++) {
+      const char = text[i];
+      if (escaped) {
+        escaped = false;
+      } else if (char === '\\') {
+        escaped = true;
+      } else if (char === quote) {
+        return i;
+      }
+    }
+    return -1;
   }
 
   /**
@@ -64,7 +153,8 @@ export class EnvParser {
     const valuePart = lineText.substring(equalIndex + 1);
 
     // Validate the key format (must look like a variable name)
-    const keyMatch = keyPart.match(/^\s*([A-Za-z0-9_.-]+)\s*$/);
+    // `export KEY=value` (shell-style) is a pair too; without this it renders as a plain-text comment.
+    const keyMatch = keyPart.match(/^\s*(?:export\s+)?([A-Za-z0-9_.-]+)\s*$/);
     if (!keyMatch) {
       const hashIdx = lineText.indexOf('#');
       return {
